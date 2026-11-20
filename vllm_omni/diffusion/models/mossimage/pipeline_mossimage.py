@@ -28,6 +28,7 @@ cannot express the joint key-padding mask).
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 from collections.abc import Iterable, Iterator, Sequence
@@ -74,6 +75,8 @@ _DEFAULT_RESOLUTION = 1024
 _DEFAULT_NUM_INFERENCE_STEPS = 50
 _DEFAULT_GUIDANCE_SCALE = 4.0
 _MAX_SEQUENCE_LENGTH = 4096
+
+logger = logging.getLogger(__name__)
 
 
 class MOSSImageScheduler(FlowMatchEulerDiscreteScheduler):
@@ -225,7 +228,22 @@ class MOSSImagePipeline(nn.Module, SkipLayerGuidanceMixin, DiffusionPipelineProf
             local_files_only=local_files_only,
             revision=od_config.revision,
             dtype=text_dtype,
-        ).to(encoder_device)
+        )
+        # Qwen3.5 ships a vision tower that MOSS-Image text-to-image does not use.
+        # Drop it while the encoder is still on CPU, before moving it to the target
+        # device, so the vision tower never consumes GPU memory. Handle both
+        # transformers layouts: newer puts visual under .model, older puts it
+        # directly on the model.
+        visual_owner = None
+        if hasattr(self.text_encoder, "model") and hasattr(self.text_encoder.model, "visual"):
+            visual_owner = self.text_encoder.model
+        elif hasattr(self.text_encoder, "visual"):
+            visual_owner = self.text_encoder
+        if visual_owner is not None:
+            del visual_owner.visual
+        else:
+            logger.warning("MOSS-Image: vision tower not found on text encoder; skipping drop")
+        self.text_encoder = self.text_encoder.to(encoder_device)
         self.text_encoder.eval()
         self.tokenizer = AutoTokenizer.from_pretrained(
             model,
